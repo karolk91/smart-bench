@@ -167,16 +167,27 @@ impl BenchRunner {
         block_hash: sp_core::H256,
     ) -> color_eyre::Result<Vec<sp_core::H256>> {
         let block = client.blocks().at(block_hash).await;
-        let hashes = block
+        let mut tx_hashes = Vec::new();
+        let extrinsics_details = block
             .unwrap_or_else(|_| panic!("block {} not found", block_hash))
             .extrinsics()
             .await
             .unwrap_or_else(|_| panic!("extrinsics at block {} not found", block_hash))
             .iter()
             .map(|e| e.unwrap_or_else(|_| panic!("extrinsic error at block {}", block_hash)))
-            .map(|e| BlakeTwo256::hash_of(&e.bytes()))
-            .collect();
-        Ok(hashes)
+            // .map(|e| BlakeTwo256::hash_of(&e.bytes()))
+            .collect::<Vec<_>>();
+
+        for ed in extrinsics_details {
+            if let Some(super::xts::api::contracts::calls::types::Call {
+                ..
+            }) = ed.as_extrinsic::<super::xts::api::contracts::calls::types::Call>()?
+            {
+                tx_hashes.push(BlakeTwo256::hash_of(&ed.bytes()));
+            }
+        }
+
+        Ok(tx_hashes)
     }
 
     /// Call each contract instance `call_count` times. Wait for all txs to be included in a block
@@ -200,7 +211,7 @@ impl BenchRunner {
                 for (_name, contract_calls) in &self.calls {
                     if let Some(contract_call) = contract_calls.get(i as usize) {
                         // dry run the call to calculate the gas limit
-                        let gas_limit = {
+                        let mut gas_limit = {
                             let dry_run = self
                                 .api
                                 .call_dry_run(
@@ -213,6 +224,16 @@ impl BenchRunner {
                                 .await?;
                             dry_run.gas_required
                         };
+
+                        // extra 5% of gas limit
+                        // due to "not enough gas" rpc errors
+                        const EXTRA_FACTOR: f64 = 1.05;
+
+                        let ref_time = gas_limit.ref_time_mut();
+                        *ref_time = ((*ref_time as f64) * EXTRA_FACTOR) as u64;
+
+                        let proof_size = gas_limit.proof_size_mut();
+                        *proof_size = ((*proof_size as f64) * EXTRA_FACTOR) as u64;
 
                         let tx_hash = self
                             .api
